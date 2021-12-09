@@ -44,7 +44,7 @@ By following the steps in the next section, you will be able to deploy an Amazon
       * ClientIpRange  
 **Note** the primary region is the one that you are deploying the cluster in. `PrimaryRegion` and `SecondaryRegion` must match the regions that you previously picked in step 1.  
 The `ClientIpRange` is a CIDR IP range that can connect to the cluster using JDBC or ODBC connection.  
-**Note** It is highly recommended to deploy any resource in private subnets for a secured deployment. To connect to a cluster deployed in a private subnet from your local machine, follow the steps in [this guide](https://aws.amazon.com/premiumsupport/knowledge-center/private-redshift-cluster-local-machine/). You can also use [Redshift Editor](https://docs.aws.amazon.com/redshift/latest/mgmt/query-editor-v2.html) from Amazon Redshift console to connect to the cluster and run your queries. 
+**Note** It is highly recommended to deploy any resource in private subnets for a secured deployment. To connect to a cluster deployed in a private subnet from your local machine, follow the steps in [this guide](https://aws.amazon.com/premiumsupport/knowledge-center/private-redshift-cluster-local-machine/). You can also use [Amazon Redshift Query Editor](https://docs.aws.amazon.com/redshift/latest/mgmt/query-editor-v2.html) from Amazon Redshift console to connect to the cluster and run your queries.  
 Deploying this stack also enables Redshift snapshot copy to the secondary region. This feature will automatically copy Redshift snapshots to the destination (secondary) region.
 
 4. After successfully deploying the [`redshift-cluster.yml`](redshift-cluster.yml) template, make sure the cross-region snapshots is enabled in the cluster maintenance tab from the Amazon Redshift console.
