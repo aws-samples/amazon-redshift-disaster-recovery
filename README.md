@@ -1,5 +1,5 @@
-# Simplifying [Amazon Redshift](https://aws.amazon.com/redshift/) Regional Disaster Recovery (DR) using [AWS CloudFormation](https://aws.amazon.com/cloudformation/)
-This repo provides guidance on how to restore an Amazon Redshift cluster to a secondary region if the cluster becomes unavailable/unreachable in the primary region. It also shows how to fail back to primary cluster when the primary region is available. The pattern uses AWS CloudFormation to build the cluster in the primary region and also restore it on demand in the second region.  
+# Simplifying Amazon Redshift Regional Disaster Recovery (DR) using AWS CloudFormation
+This repo provides guidance on how to restore an [Amazon Redshift](https://aws.amazon.com/redshift/) cluster to a secondary region if the cluster becomes unavailable/unreachable in the primary region. It also shows how to fail back to primary cluster when the primary region is available. The pattern uses [AWS CloudFormation](https://aws.amazon.com/cloudformation/) to build the cluster in the primary region and also restore it on demand in the second region.  
 This repo is used by an [AWS Prescriptive Guidance (APG)](https://aws.amazon.com/prescriptive-guidance/) pattern with the same name. You can find the pattern [here](TBD) in the APG library. 
 
 ## Target technology stack
