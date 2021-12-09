@@ -1,0 +1,313 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: redshift cluster dependencies (e.g. IAM role, KMS key, snapshot copy grant, ...)
+
+Mappings:
+  RedshiftLoggingAccountIDRegionMap:
+    us-east-1:
+      RSAccountID: 193672423079
+    us-east-2:
+      RSAccountID: 391106570357
+    us-west-1:
+      RSAccountID: 262260360010
+    us-west-2:
+      RSAccountID: 902366379725
+    ap-east-1:
+      RSAccountID: 313564881002
+    ap-south-1:
+      RSAccountID: 865932855811
+    ap-northeast-3:
+      RSAccountID: 090321488786
+    ap-northeast-2:
+      RSAccountID: 760740231472
+    ap-southeast-1:
+      RSAccountID: 361669875840
+    ap-southeast-2:
+      RSAccountID: 762762565011
+    ap-northeast-1:
+      RSAccountID: 404641285394
+    ca-central-1:
+      RSAccountID: 907379612154
+    cn-north-1:
+      RSAccountID: 111890595117
+    cn-northwest-1:
+      RSAccountID: 660998842044
+    eu-west-1:
+      RSAccountID: 210876761215
+    eu-central-1:
+      RSAccountID: 053454850223
+    eu-west-2:
+      RSAccountID: 307160386991
+    eu-west-3:
+      RSAccountID: 915173422425
+    eu-north-1:
+      RSAccountID: 729911121831
+    sa-east-1:
+      RSAccountID: 075028567923
+
+Resources:
+  RedshiftClusterKmsCmk:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS CMK key to be used for Redshift cluster encryption at rest
+      Enabled: true
+      EnableKeyRotation: true
+      PendingWindowInDays: 10
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "redshift-cluster-cmk"
+        Statement:
+          - Sid: Allow access to account root user to enable IAM policies for this key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Sid: Allow access through Redshift for all principals in the account that are authorized to use Redshift
+            Effect: 'Allow'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:CreateGrant'
+              - 'kms:ListGrants'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Sub '${AWS::AccountId}'
+                'kms:ViaService': !Sub 'redshift.${AWS::Region}.amazonaws.com'
+  
+  RedshiftDataS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketName: !Sub 'redshift-data-${AWS::Region}-${AWS::AccountId}'
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Status: Enabled
+            ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 365
+            Transitions:
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+  
+  RedshiftDataS3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref RedshiftDataS3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: !Sub 'arn:aws:s3:::${RedshiftDataS3Bucket}/*'
+            Condition:
+              "Bool":
+                "aws:SecureTransport": false
+          - Effect: Allow
+            Principal:
+              AWS: !Join ['', ['arn:aws:iam::', !FindInMap [RedshiftLoggingAccountIDRegionMap, !Ref 'AWS::Region', RSAccountID], ':user/logs']]
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${RedshiftDataS3Bucket}/*'
+          - Effect: Allow
+            Principal:
+              AWS: !Join ['', ['arn:aws:iam::', !FindInMap [RedshiftLoggingAccountIDRegionMap, !Ref 'AWS::Region', RSAccountID], ':user/logs']]
+            Action:
+              - s3:GetBucketAcl
+            Resource:
+              - !Sub 'arn:aws:s3:::${RedshiftDataS3Bucket}'
+  
+  RedshiftClusterIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: redshift-service-permissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:Encrypt"
+                  - "kms:Decrypt"
+                  - "kms:ReEncrypt*"
+                  - "kms:GenerateDataKey"
+                  - "kms:GenerateDataKeyWithoutPlaintext"
+                Resource:
+                  - !GetAtt RedshiftClusterKmsCmk.Arn
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RedshiftDataS3Bucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Join ["", [!GetAtt RedshiftDataS3Bucket.Arn, "/*"]]
+  
+  CreateRedshiftSnapshotCopyGrant:
+    Type: Custom::RedshiftSnapshotCopyGrant
+    Properties:
+      ServiceToken: !GetAtt [ 'RedshiftSnapshotCopyGrantFunc', Arn ]
+
+  RedshiftSnapshotCopyGrantFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: redshift-snapshot-copy-grant
+      Description: "creates/deletes redshift snapshot copy grant"
+      Handler: index.handler
+      Runtime: python3.8
+      Role: !GetAtt ['RedshiftSnapshotCopyGrantRole', Arn ]
+      Timeout: 20
+      Code: 
+        ZipFile: |
+          import json
+          import cfnresponse
+          import boto3
+          import sys
+          import os
+          def handler(event, context):
+            json_event = json.dumps(event)
+            print("recieved event:")
+            print(json_event)
+            client = boto3.client('redshift')
+            rs_kms_key_id = os.environ['RS_KMS_KEY_ID']
+            responseData = {}
+            
+            try: 
+              if event['RequestType'] == 'Create':
+                res = client.create_snapshot_copy_grant(
+                  SnapshotCopyGrantName='redshift-snapshot-copy-grant',
+                  KmsKeyId=rs_kms_key_id,
+                )
+                responseData['msg'] = 'Redshift snapshot copy grant is created'
+                
+              elif event['RequestType'] == 'Delete':
+                res = client.delete_snapshot_copy_grant(
+                  SnapshotCopyGrantName='redshift-snapshot-copy-grant'
+                )
+                responseData['msg'] = 'Redshift snapshot copy grant to is deleted'
+                
+              else:
+                responseData['msg'] = f"unknown request: {event['RequestType']}"
+            
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+            
+            except Exception as e:
+              exc_tb = sys.exc_info()[2]
+              responseData['msg'] = 'An ERROR occurred: ' + str(e.__class__.__name__) + ': ' + str(e) + ' from line ' + str(exc_tb.tb_lineno)
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "CustomResourcePhysicalID")
+      Environment:
+        Variables:
+          RS_KMS_KEY_ID: !Ref RedshiftClusterKmsCmk
+  
+  RedshiftSnapshotCopyGrantRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: redshift-snapshot-copy-grant-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redshift-snapshot-copy-grant:*
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redshift-snapshot-copy-grant:*:*
+              - Effect: Allow
+                Action:
+                  - "redshift:CreateSnapshotCopyGrant"
+                  - "redshift:DeleteSnapshotCopyGrant"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:CreateGrant"
+                  - "kms:RevokeGrant"
+                Resource:
+                  - !GetAtt RedshiftClusterKmsCmk.Arn
+
+
+Outputs:
+  RedshiftClusterKmsCmkId:
+    Description: Redshift KMS CMK key ID
+    Value: !Ref RedshiftClusterKmsCmk
+    Export:
+      Name: RedshiftClusterKmsCmkId
+  RedshiftClusterKmsCmkArn:
+    Description: Redshift KMS CMK key ARN
+    Value: !GetAtt RedshiftClusterKmsCmk.Arn
+    Export:
+      Name: RedshiftClusterKmsCmkArn
+  RedshiftClusterIamRoleArn:
+    Description: Redshift cluster IAM role ARN
+    Value: !GetAtt RedshiftClusterIamRole.Arn
+    Export:
+      Name: RedshiftClusterIamRoleArn
+  RedshiftDataBucketName:
+    Description: Redshift data bucket name
+    Value: !Ref RedshiftDataS3Bucket
+    Export:
+      Name: RedshiftDataBucketName

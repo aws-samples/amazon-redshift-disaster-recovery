@@ -1,0 +1,306 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: amazon redshift cluster with regional failover capability
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'AWS Regions'
+        Parameters:
+          - PrimaryRegion
+          - SecondaryRegion
+      - Label:
+          default: 'Cluster Specifications'
+        Parameters:
+          - NodeType
+          - DatabaseName
+          - AdminUsername
+          - PortNumber
+          - ClientIpRange
+          - RedshiftSnapshotRetentionPeriod
+          - SnapshotIdentifier
+      - Label:
+          default: 'VPC'
+        Parameters:
+          - VpcId
+          - SubnetIds
+
+Parameters:
+  DatabaseName:
+    Description: The name of the first database to be created when the cluster is created.
+    Type: String
+    Default: dev
+    AllowedPattern: "([a-z]|[0-9]|[_])+"
+  NodeType:
+    Description: The node type to be provisioned for the cluster.
+    Type: String
+    Default: dc2.large
+    AllowedValues:
+      - ds2.xlarge
+      - ds2.8xlarge
+      - dc2.large
+      - dc2.8xlarge
+      - ra3.16xlarge
+  AdminUsername:
+    Description: The user name associated with the admin user account for the cluster that is being created.
+    Type: String
+    Default: rsadmin
+    AllowedPattern: "([a-z])([a-z]|[0-9])*"
+  PortNumber:
+    Description: The port number on which the cluster accepts incoming connections.
+    Type: Number
+    Default: "5439"
+    MinValue: "1150"
+    MaxValue: "65535"
+  ClientIpRange:
+    Description: The IP address range that can be used to connect to database.
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  VpcId:
+    Description: The VPC ID that the redshfit cluster is being deployed in.
+    Type: String
+    Default: ""
+  SubnetIds:
+    Description: The subnet Ids to create a subnet group for the redshift cluster.
+    Type: String
+    Default: ""
+  RedshiftSnapshotRetentionPeriod:
+    Description: The number of days that automated snapshots are retained. If the value is 0, automated snapshots are disabled.
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  SnapshotIdentifier:
+    Description: the snapshot identifier to restore the cluster from latest snapshot.
+    Type: String
+    Default: ""
+  PrimaryRegion:
+    Description: the primary region to deploy Redshift cluster in.
+    Type: String
+    Default: ""
+  SecondaryRegion:
+    Description: the secondary region to failover Redshift cluster to.
+    Type: String
+    Default: ""
+
+Conditions:
+  IsPrimaryRegion: !Equals [!Sub "${AWS::Region}", !Ref PrimaryRegion]
+  IsSecondaryRegion: !Equals [!Sub "${AWS::Region}", !Ref SecondaryRegion]
+  
+  # deploy to second region if SnapshotIdentifier is provided
+  ShouldDeployToSecondRegion: 
+    !And 
+      - Condition: IsSecondaryRegion
+      - !Not [!Equals [!Ref SnapshotIdentifier, ""]]
+  
+  # building redshift cluster if it is primary region OR "ShouldDeployToSecondRegion" is true
+  ShouldBuildRedshiftCluster:
+    !Or
+      - !Equals [!Sub "${AWS::Region}", !Ref PrimaryRegion]
+      - Condition: ShouldDeployToSecondRegion
+  
+  # should not provide the kms key id in the redshift resource if the cluster will be restore from a snapshot
+  # cluster always will be restored from a snapshot in the second region
+  ShouldUseKmsKeyId:
+    !And 
+      - Condition: IsPrimaryRegion
+      - !Equals [!Ref SnapshotIdentifier, ""]
+
+
+Resources:
+  ApgRedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Condition: ShouldBuildRedshiftCluster
+    DeletionPolicy: 'Snapshot'
+    UpdateReplacePolicy: 'Snapshot'
+    Properties:
+      ClusterType: single-node
+      NodeType: !Ref NodeType
+      DBName: !Ref DatabaseName
+      Encrypted: true
+      KmsKeyId: 
+        !If
+          - ShouldUseKmsKeyId
+          - !ImportValue RedshiftClusterKmsCmkArn
+          - !Ref "AWS::NoValue"
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref SecretRedshiftAdminUser, ':SecretString:username}}' ]]
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref SecretRedshiftAdminUser, ':SecretString:password}}' ]]
+      VpcSecurityGroupIds:
+        - !GetAtt SecurityGroup.GroupId
+      ClusterSubnetGroupName: !Ref SubnetGroup
+      IamRoles:
+        - !ImportValue RedshiftClusterIamRoleArn
+      Port: !Ref PortNumber
+      PubliclyAccessible: false
+      AutomatedSnapshotRetentionPeriod: !Ref RedshiftSnapshotRetentionPeriod
+      SnapshotIdentifier: !Ref SnapshotIdentifier
+      ClusterParameterGroupName: !Ref ClusterParameterGroup
+      LoggingProperties:
+        BucketName: !ImportValue RedshiftDataBucketName
+        S3KeyPrefix: AuditLogs
+  
+  SecretRedshiftAdminUser:
+    Type: "AWS::SecretsManager::Secret"
+    Condition: ShouldBuildRedshiftCluster
+    Properties:
+      Description: "Secrets Manager to store Redshift Admin user credentials"
+      GenerateSecretString:
+        SecretStringTemplate: !Sub
+          - '{"username": "${AdminUsername}"}'
+          - {AdminUsername: !Ref AdminUsername}
+        GenerateStringKey: "password"
+        ExcludePunctuation: true
+  
+  SecretAttachmentRedshiftAdminUser:
+    Type: "AWS::SecretsManager::SecretTargetAttachment"
+    Condition: ShouldBuildRedshiftCluster
+    Properties:
+      SecretId: !Ref SecretRedshiftAdminUser
+      TargetId: !Ref ApgRedshiftCluster
+      TargetType: AWS::Redshift::Cluster
+
+  ClusterParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: !Join [ " ", [ !Ref 'AWS::StackName', " - Redshift Cluster Parameter group" ]] 
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+        - ParameterName: require_ssl
+          ParameterValue: 'true'
+        - ParameterName: enable_user_activity_logging
+          ParameterValue: 'true'
+  
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Redshift cluster
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: allowing cluster access to the SQL client (your personal IP)
+          IpProtocol: tcp
+          FromPort: !Ref PortNumber
+          ToPort: !Ref PortNumber
+          CidrIp: !Ref ClientIpRange
+      SecurityGroupEgress:
+        - Description: Allow outbound traffic to the client IP address
+          IpProtocol: "-1"
+          CidrIp: !Ref ClientIpRange
+              
+  SubnetGroup:
+    Type: 'AWS::Redshift::ClusterSubnetGroup'
+    Properties:
+      Description: redshift cluster subnet group
+      SubnetIds: !Split
+        - ","
+        - !Ref SubnetIds
+  
+  EnableRedshiftSnapshotCopy:
+    Type: Custom::EnableRedshiftSnapshotCopy
+    Condition: ShouldBuildRedshiftCluster
+    Properties:
+      ServiceToken: !GetAtt [ 'RedshiftSnapshotCopyFunc', Arn ]
+      RedshiftClusterId: !Ref ApgRedshiftCluster
+      DestinationRegion: 
+        !If
+          - IsPrimaryRegion
+          - !Ref SecondaryRegion
+          - !Ref PrimaryRegion
+
+  RedshiftSnapshotCopyFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: redshift-snapshot-copy
+      Description: "enables redshift snapshot copy"
+      Handler: index.handler
+      Runtime: python3.8
+      Role: !GetAtt ['RedshiftSnapshotCopyRole', Arn ]
+      Timeout: 20
+      Code: 
+        ZipFile: |
+          import json
+          import cfnresponse
+          import boto3
+          import sys
+          def handler(event, context):
+            json_event = json.dumps(event)
+            print("recieved event:")
+            print(json_event)
+            client = boto3.client('redshift')
+            rs_cluster_id = event['ResourceProperties']['RedshiftClusterId']
+            destination_region = event['ResourceProperties']['DestinationRegion']
+            responseData = {}
+            
+            try: 
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                try:
+                  res = client.enable_snapshot_copy(
+                    ClusterIdentifier=rs_cluster_id,
+                    DestinationRegion=destination_region,
+                    RetentionPeriod=1,
+                    SnapshotCopyGrantName='redshift-snapshot-copy-grant',
+                    ManualSnapshotRetentionPeriod=1
+                  )
+                  responseData['msg'] = 'Redshift snapshot copy is enabled'
+                except SnapshotCopyAlreadyEnabledFault as error:
+                  responseData['msg'] = 'Redshift snapshot copy is already enabled'
+                
+              elif event['RequestType'] == 'Delete':
+                res = client.disable_snapshot_copy(ClusterIdentifier=rs_cluster_id)
+                responseData['msg'] = 'Redshift snapshot copy is disabled'
+                
+              else:
+                responseData['msg'] = f"unknown request: {event['RequestType']}"
+            
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+            
+            except Exception as e:
+              exc_tb = sys.exc_info()[2]
+              responseData['msg'] = 'An ERROR occurred: ' + str(e.__class__.__name__) + ': ' + str(e) + ' from line ' + str(exc_tb.tb_lineno)
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "CustomResourcePhysicalID")
+
+  
+  RedshiftSnapshotCopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: redshift-snapshot-copy-grant-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redshift-snapshot-copy:*"
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/redshift-snapshot-copy:*:*"
+              - Effect: Allow
+                Action:
+                  - "redshift:EnableSnapshotCopy"
+                  - "redshift:DisableSnapshotCopy"
+                Resource: !Sub "arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:*"
+              - Effect: Allow
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:CreateGrant"
+                  - "kms:RevokeGrant"
+                Resource: !ImportValue RedshiftClusterKmsCmkArn
+    
